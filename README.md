@@ -1,6 +1,6 @@
-# YVO Bot Backend
+# Your Very Own Chatbot (Backend)
 
-Your Very Own Chatbot Backend - A secure FastAPI-based REST API that provides authentication and proxies chat requests to a local Ollama instance.
+A secure FastAPI-based REST API that provides authentication and proxies chat requests to a local Ollama instance.
 
 ## Overview
 
@@ -16,13 +16,19 @@ This backend service enables secure access to a local Ollama LLM through a REST 
 
 ## Quick Start
 
-1. **Install dependencies:**
+1. Create and activate a virtual environment (optional, recommended):
+```bash
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+```
+
+2. **Install dependencies:**
    ```bash
    pip install -r requirements.txt
    ```
 
-2. **Create environment file:**
-   Create a `.env` file with the following variables:
+3. **Create environment file:**
+   Copy and modify `.env-example` or create a `.env` file with the following variables:
    ```
    OLLAMA_URL=http://localhost:11434/api/generate
    MODEL_NAME=llama2
@@ -33,12 +39,12 @@ This backend service enables secure access to a local Ollama LLM through a REST 
    PASSWORD=your-password
    ```
 
-3. **Run the application:**
+4. **Run the application:**
    ```bash
    uvicorn main:app --reload
    ```
 
-4. **Access the API:**
+5. **Access the API:**
    - Interactive docs: `http://localhost:8000/docs`
    - API endpoints: `http://localhost:8000`
 
