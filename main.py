@@ -8,6 +8,7 @@ from jose import JWTError, jwt
 from typing import Annotated
 from dotenv import load_dotenv
 import os
+from starlette.responses import FileResponse
 
 # Load environment variables
 load_dotenv()
@@ -70,6 +71,9 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
 app = FastAPI()
+@app.get("/")
+def serve_frontend():
+    return FileResponse("./public/index.html")
 
 @app.post("/login", response_model = TokenResponse)
 def login(request: LoginRequest) -> TokenResponse:
