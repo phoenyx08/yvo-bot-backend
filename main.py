@@ -8,7 +8,7 @@ from jose import JWTError, jwt
 from typing import Annotated
 from dotenv import load_dotenv
 import os
-from starlette.responses import FileResponse
+from starlette.responses import FileResponse, StreamingResponse
 
 # Load environment variables
 load_dotenv()
@@ -70,6 +70,18 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
+def ollama_stream(prompt: str):
+    payload = {
+        "model": MODEL_NAME,
+        "prompt": prompt,
+        "stream": True
+    }
+
+    with httpx.stream("POST", OLLAMA_URL, json=payload) as response:
+        for chunk in response.iter_bytes():
+            if chunk:
+                yield chunk
+
 app = FastAPI()
 @app.get("/")
 def serve_frontend():
@@ -87,28 +99,15 @@ def login(request: LoginRequest) -> TokenResponse:
 async def ask(
         request: Request,
         token: str = Depends(oauth2_scheme)
-) -> Response:
+):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
         username = payload.get("sub")
         if username is None:
             raise HTTPException(status_code=401)
 
-        payload = {
-            "model": MODEL_NAME,
-            "prompt": request.query,
-            "stream": False
-        }
-
-        timeout = httpx.Timeout(30.0, connect = 5.0)
-        async with httpx.AsyncClient(timeout = timeout) as client:
-            response = await client.post(OLLAMA_URL, json = payload)
-            response.raise_for_status()
-            result = response.json()
-            return Response(response = result["response"])
+        return StreamingResponse(ollama_stream(request.query), media_type="application/json")
     except JWTError:
         raise HTTPException(status_code=401)
     except httpx.RequestError as e:
         raise HTTPException(status_code = 500, detail=f"Request failed: {e}")
-    except httpx.HTTPStatusError as e:
-        raise HTTPException(status_code = response.status_code, detail = str(e))
