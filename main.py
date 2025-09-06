@@ -1,3 +1,5 @@
+import json
+
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
@@ -69,9 +71,11 @@ async def ollama_stream(history: list[dict]) -> AsyncGenerator[bytes, None]:
     """
     Async generator that yields raw bytes from Ollama as soon as they arrive.
     """
+    prompt = history_to_prompt(history)
+
     payload = {
         "model": MODEL_NAME,
-        "messages": history,
+        "prompt": prompt,
         "stream": True,
     }
 
@@ -109,18 +113,32 @@ async def ask(
     history.append({"role": "user", "content": payload.query})
 
     assistant_chunks = bytearray()
+    partial_reply: list[str] = []
 
     async def streamer() -> AsyncGenerator[bytes, None]:
         async for chunk in ollama_stream(history):
             # Pass the chunk on to the client *and* keep a copy
             yield chunk
+            data = json.loads(chunk.decode("utf-8"))
             assistant_chunks.extend(chunk)
+            if "response" in data and data["response"]:
+                partial_reply.append(data["response"])
 
         # After the stream ends, append the assistant message to history
-        reply_text = assistant_chunks.decode("utf-8").strip()
-        history.append({"role": "assistant", "content": reply_text})
+        final_text = "".join(partial_reply).strip()
+        history.append({"role": "assistant", "content": final_text})
 
         # Persist the new history with a TTL
         sessions[jti] = (history, time.time() + ACCESS_TOKEN_EXPIRE_MINUTES * 60)
 
     return StreamingResponse(streamer(), media_type="text/plain")
+
+def history_to_prompt(history: list[dict]) -> str:
+    """
+    Convert the list of message dicts into a single string that
+    Ollama’s /api/generate endpoint expects.
+    """
+    if not history:
+        return "You are a helpful chatbot. Start the conversation."
+    # Example:  role: content  \n
+    return "\n".join(f"{msg['role']}: {msg['content']}" for msg in history)
