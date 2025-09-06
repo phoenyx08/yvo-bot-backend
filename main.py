@@ -3,21 +3,22 @@ from fastapi.security import OAuth2PasswordBearer
 from pydantic import BaseModel
 import httpx
 from passlib.context import CryptContext
-from datetime import datetime, timedelta
 from jose import JWTError, jwt
-from typing import Annotated
+from typing import Annotated, AsyncGenerator
 from dotenv import load_dotenv
 import os
 from starlette.responses import FileResponse, StreamingResponse
+from auth_utils import get_jti_from_token, create_access_token
+from session_store import sessions
+import time
 
-# Load environment variables
 load_dotenv()
 
 OLLAMA_URL = os.getenv("OLLAMA_URL")
 MODEL_NAME = os.getenv("MODEL_NAME")
 SECRET_KEY = os.getenv("SECRET_KEY")
 ALGORITHM = os.getenv("ALGORITHM")
-ACCESS_TOKEN_EXPIRE_MINUTES = os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES")
+ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES"))
 USERNAME = os.getenv("USERNAME")
 PASSWORD = os.getenv("PASSWORD")
 
@@ -55,12 +56,6 @@ def authenticate_user(username: str, password: str):
         return None
     return user
 
-def create_access_token(data: dict, expires_delta: timedelta = None):
-    to_encode = data.copy()
-    expire = datetime.utcnow() + (expires_delta or timedelta(minutes=15))
-    to_encode.update({"exp": expire})
-    return jwt.encode(to_encode, SECRET_KEY, algorithm=ALGORITHM)
-
 async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
     try:
         payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
@@ -70,17 +65,22 @@ async def get_current_user(token: Annotated[str, Depends(oauth2_scheme)]):
     except JWTError:
         raise HTTPException(status_code=401, detail="Invalid or expired token")
 
-def ollama_stream(prompt: str):
+async def ollama_stream(history: list[dict]) -> AsyncGenerator[bytes, None]:
+    """
+    Async generator that yields raw bytes from Ollama as soon as they arrive.
+    """
     payload = {
         "model": MODEL_NAME,
-        "prompt": prompt,
-        "stream": True
+        "messages": history,
+        "stream": True,
     }
 
-    with httpx.stream("POST", OLLAMA_URL, json=payload) as response:
-        for chunk in response.iter_bytes():
-            if chunk:
-                yield chunk
+    async with httpx.AsyncClient() as client:
+        async with client.stream("POST", OLLAMA_URL, json=payload) as resp:
+            resp.raise_for_status()          # raises 4xx/5xx if the request failed
+            async for chunk in resp.aiter_bytes():
+                if chunk:
+                    yield chunk
 
 app = FastAPI()
 @app.get("/")
@@ -91,23 +91,36 @@ def serve_frontend():
 def login(request: LoginRequest) -> TokenResponse:
     user = authenticate_user(request.username, request.password)
     if not user:
-        raise HTTPException(status_code=401, detail="Invalid username or password")
-    token = create_access_token(data={"sub": user["username"]})
+        raise HTTPException(status_code = 401, detail = "Invalid username or password")
+    token = create_access_token(data = {"sub": user["username"]})
     return TokenResponse(accessToken = token)
 
 @app.post("/ask")
 async def ask(
-        request: Request,
-        token: str = Depends(oauth2_scheme)
+    payload: Request,
+    token: str = Depends(oauth2_scheme),
 ):
-    try:
-        payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])
-        username = payload.get("sub")
-        if username is None:
-            raise HTTPException(status_code=401)
+    jti = get_jti_from_token(token)
+    history, expiry = sessions.get(jti, ([], 0.0))
 
-        return StreamingResponse(ollama_stream(request.query), media_type="application/json")
-    except JWTError:
-        raise HTTPException(status_code=401)
-    except httpx.RequestError as e:
-        raise HTTPException(status_code = 500, detail=f"Request failed: {e}")
+    if expiry < time.time():
+        history, expiry = [], 0.0
+
+    history.append({"role": "user", "content": payload.query})
+
+    assistant_chunks = bytearray()
+
+    async def streamer() -> AsyncGenerator[bytes, None]:
+        async for chunk in ollama_stream(history):
+            # Pass the chunk on to the client *and* keep a copy
+            yield chunk
+            assistant_chunks.extend(chunk)
+
+        # After the stream ends, append the assistant message to history
+        reply_text = assistant_chunks.decode("utf-8").strip()
+        history.append({"role": "assistant", "content": reply_text})
+
+        # Persist the new history with a TTL
+        sessions[jti] = (history, time.time() + ACCESS_TOKEN_EXPIRE_MINUTES * 60)
+
+    return StreamingResponse(streamer(), media_type="text/plain")
